@@ -151,11 +151,8 @@ class SlideToHtmlRequest(BaseModel):
 
 
 def get_google_api_key():
-    # Thử lấy từ biến môi trường
     key = os.getenv("GOOGLE_API_KEY")
     if key: return key
-    
-    # Nếu không có, đọc từ file config của user
     config_path = os.getenv("USER_CONFIG_PATH")
     if config_path and os.path.exists(config_path):
         try:
@@ -163,8 +160,47 @@ def get_google_api_key():
                 config = json.load(f)
                 return config.get("GOOGLE_API_KEY")
         except Exception as e:
-            print(f"Lỗi đọc file config: {e}")
+            pass
     return None
+
+def parse_oxml_to_elements(xml_str: str) -> list:
+    """Hàm trích xuất tọa độ (chuyển EMU sang Pixel) và nội dung text từ OXML"""
+    if not xml_str:
+        return []
+    try:
+        # Xóa các namespaces của XML để dễ parse
+        xml_clean = re.sub(r'\sxmlns(:\w+)?="[^"]+"', '', xml_str)
+        xml_clean = re.sub(r'([a-zA-Z0-9]+):', '', xml_clean)
+        root = ET.fromstring(xml_clean)
+        
+        elements = []
+        # Tìm tất cả các thẻ shape, picture, graphicFrame
+        for node in root.findall('.//sp') + root.findall('.//pic') + root.findall('.//graphicFrame'):
+            off = node.find('.//off')
+            ext = node.find('.//ext')
+            if off is not None and ext is not None:
+                # Chuyển đổi EMU sang Pixel (1 Pixel = 9525 EMU)
+                x = round(int(off.get('x', 0)) / 9525, 2)
+                y = round(int(off.get('y', 0)) / 9525, 2)
+                w = round(int(ext.get('cx', 0)) / 9525, 2)
+                h = round(int(ext.get('cy', 0)) / 9525, 2)
+                
+                # Trích xuất text (nếu có)
+                texts = [t.text for t in node.findall('.//t') if t.text]
+                text_content = " ".join(texts).strip()
+                
+                elements.append({
+                    "type": node.tag,
+                    "x": x,
+                    "y": y,
+                    "width": w,
+                    "height": h,
+                    "text": text_content if text_content else None
+                })
+        return elements
+    except Exception as e:
+        print(f"OXML Parsing Error: {e}")
+        return []
 
 # async def generate_html_from_slide(
 #     base64_image: str,
@@ -558,17 +594,16 @@ async def convert_slide_to_html(request: SlideToHtmlRequest):
     try:
         google_key = get_google_api_key()
         if not google_key:
-            raise HTTPException(status_code=400, detail="Google API Key không tồn tại. Vui lòng cập nhật trong cài đặt.")
+            raise HTTPException(status_code=400, detail="Google API Key không tồn tại.")
         
         genai.configure(api_key=google_key)
         
-        # 1. SỬ DỤNG PROMPT GỐC (Chứa luật dàn trang chi tiết)
         model = genai.GenerativeModel(
             model_name=DEFAULT_GOOGLE_MODEL,
             system_instruction=GENERATE_HTML_SYSTEM_PROMPT
         )
         
-        # --- ĐỌC ẢNH VÀ LẤY MIME_TYPE ---
+        # Đọc file ảnh
         image_path = request.image
         if image_path.startswith("/app_data/images/"):
             actual_image_path = os.path.join(get_images_directory(), image_path[len("/app_data/images/"):])
@@ -582,21 +617,19 @@ async def convert_slide_to_html(request: SlideToHtmlRequest):
 
         with open(actual_image_path, "rb") as f:
             image_data = f.read()
-
         ext = os.path.splitext(actual_image_path)[1].lower()
         mime_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(ext, "image/png")
 
+        # --- GỌI HÀM PARSE OXML THÀNH JSON ---
+        parsed_elements = parse_oxml_to_elements(request.xml)
+        elements_json = json.dumps(parsed_elements, indent=2)
 
-        # 1. Chuyển đổi danh sách elements thành chuỗi JSON đẹp mắt
-        elements_data = [elem.dict() for elem in request.elements]
-        elements_json = json.dumps(elements_data, indent=2)
-
-        # 2. SỬA LẠI CÁCH TRUYỀN FONT VÀ OXML CHO CÓ NGỮ CẢNH
+        # Xử lý Font
         fonts_text = ""
         if request.fonts:
             fonts_text = f"\nFONTS (Safe Tailwind fonts to map to): {', '.join(request.fonts)}"
         
-        # 3. Gom Data: Ảnh + JSON Tọa độ + Font
+        # Gom Prompt (Sử dụng JSON đã được Python tính sẵn Pixel)
         user_prompt = f"SLIDE ELEMENTS (Absolute coordinates in Pixels):\n{elements_json}\n{fonts_text}"
 
         content_parts = [
@@ -604,7 +637,6 @@ async def convert_slide_to_html(request: SlideToHtmlRequest):
             user_prompt
         ]
         
-        # 3. ÉP NHIỆT ĐỘ = 0.0 ĐỂ CODE ỔN ĐỊNH VÀ CHÍNH XÁC
         response = model.generate_content(
             content_parts,
             generation_config=genai.types.GenerationConfig(
