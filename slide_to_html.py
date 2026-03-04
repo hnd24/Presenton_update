@@ -133,6 +133,23 @@ class TemplateInfo(BaseModel):
     description: Optional[str] = None
     created_at: Optional[datetime] = None
 
+class ElementPosition(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+class SlideElement(BaseModel):
+    type: str  # Ví dụ: 'text', 'rectangle', 'image', 'line'
+    content: Optional[str] = None
+    position: ElementPosition
+
+class SlideToHtmlRequest(BaseModel):
+    image: str  # Đường dẫn ảnh slide
+    elements: List[SlideElement]  # THAY THẾ CHO trường xml: str
+    fonts: Optional[List[str]] = None
+
+
 def get_google_api_key():
     # Thử lấy từ biến môi trường
     key = os.getenv("GOOGLE_API_KEY")
@@ -569,12 +586,18 @@ async def convert_slide_to_html(request: SlideToHtmlRequest):
         ext = os.path.splitext(actual_image_path)[1].lower()
         mime_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(ext, "image/png")
 
+
+        # 1. Chuyển đổi danh sách elements thành chuỗi JSON đẹp mắt
+        elements_data = [elem.dict() for elem in request.elements]
+        elements_json = json.dumps(elements_data, indent=2)
+
         # 2. SỬA LẠI CÁCH TRUYỀN FONT VÀ OXML CHO CÓ NGỮ CẢNH
         fonts_text = ""
         if request.fonts:
-            fonts_text = f"\nFONTS (Normalized root families used in this slide, use where it is required): {', '.join(request.fonts)}"
+            fonts_text = f"\nFONTS (Safe Tailwind fonts to map to): {', '.join(request.fonts)}"
         
-        user_prompt = f"OXML DATA:\n{request.xml}\n{fonts_text}"
+        # 3. Gom Data: Ảnh + JSON Tọa độ + Font
+        user_prompt = f"SLIDE ELEMENTS (Absolute coordinates in Pixels):\n{elements_json}\n{fonts_text}"
 
         content_parts = [
             {"mime_type": mime_type, "data": image_data},
