@@ -712,7 +712,7 @@ async def convert_html_to_react(request: HtmlToReactRequest):
         # 1. SỬ DỤNG PROMPT GỐC (Chứa ví dụ Schema rất tốt)
         model = genai.GenerativeModel(
             model_name=DEFAULT_GOOGLE_MODEL,
-            system_instruction=HTML_TO_REACT_SYSTEM_PROMPT
+            system_instruction=HTML_TO_REACT_SYSTEM_PROMPT_GEMINI
         )
         
         content_parts = []
