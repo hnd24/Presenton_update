@@ -544,12 +544,14 @@ async def convert_slide_to_html(request: SlideToHtmlRequest):
             raise HTTPException(status_code=400, detail="Google API Key không tồn tại. Vui lòng cập nhật trong cài đặt.")
         
         genai.configure(api_key=google_key)
+        
+        # 1. SỬ DỤNG PROMPT GỐC (Chứa luật dàn trang chi tiết)
         model = genai.GenerativeModel(
             model_name=DEFAULT_GOOGLE_MODEL,
             system_instruction=GENERATE_HTML_SYSTEM_PROMPT
         )
         
-        # --- BẮT ĐẦU PHẦN BỔ SUNG: XỬ LÝ ẢNH ---
+        # --- ĐỌC ẢNH VÀ LẤY MIME_TYPE ---
         image_path = request.image
         if image_path.startswith("/app_data/images/"):
             actual_image_path = os.path.join(get_images_directory(), image_path[len("/app_data/images/"):])
@@ -561,23 +563,30 @@ async def convert_slide_to_html(request: SlideToHtmlRequest):
         if not os.path.exists(actual_image_path):
             raise HTTPException(status_code=404, detail=f"Không tìm thấy file ảnh slide tại: {image_path}")
 
-        # Đọc file ảnh lên bộ nhớ
         with open(actual_image_path, "rb") as f:
             image_data = f.read()
 
-        # Lấy định dạng ảnh (mime_type)
         ext = os.path.splitext(actual_image_path)[1].lower()
         mime_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(ext, "image/png")
-        # --- KẾT THÚC PHẦN BỔ SUNG ---
 
-        # Gom ảnh và XML lại để gửi cho Gemini Vision
+        # 2. SỬA LẠI CÁCH TRUYỀN FONT VÀ OXML CHO CÓ NGỮ CẢNH
+        fonts_text = ""
+        if request.fonts:
+            fonts_text = f"\nFONTS (Normalized root families used in this slide, use where it is required): {', '.join(request.fonts)}"
+        
+        user_prompt = f"OXML DATA:\n{request.xml}\n{fonts_text}"
+
         content_parts = [
             {"mime_type": mime_type, "data": image_data},
-            f"XML: {request.xml}\nFonts: {request.fonts}"
+            user_prompt
         ]
         
+        # 3. ÉP NHIỆT ĐỘ = 0.0 ĐỂ CODE ỔN ĐỊNH VÀ CHÍNH XÁC
         response = model.generate_content(
             content_parts,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.0,
+            )
         )
 
         html_content = response.text
@@ -676,15 +685,15 @@ async def convert_html_to_react(request: HtmlToReactRequest):
             raise HTTPException(status_code=400, detail="Google API Key không tồn tại.")
             
         genai.configure(api_key=google_key)
+        
+        # 1. SỬ DỤNG PROMPT GỐC (Chứa ví dụ Schema rất tốt)
         model = genai.GenerativeModel(
             model_name=DEFAULT_GOOGLE_MODEL,
             system_instruction=HTML_TO_REACT_SYSTEM_PROMPT
         )
         
-        # Tạo mảng chứa nội dung gửi cho AI
         content_parts = []
         
-        # Nếu Frontend có gửi kèm ảnh tham khảo
         if request.image:
             image_path = request.image
             if image_path.startswith("/app_data/images/"):
@@ -697,14 +706,16 @@ async def convert_html_to_react(request: HtmlToReactRequest):
                     image_data = f.read()
                 ext = os.path.splitext(actual_image_path)[1].lower()
                 mime_type = {".jpg": "image/jpeg", ".png": "image/png"}.get(ext, "image/png")
-                # Thêm ảnh vào mảng nội dung
                 content_parts.append({"mime_type": mime_type, "data": image_data})
 
-        # Thêm HTML text vào mảng nội dung
         content_parts.append(f"HTML: {request.html}")
         
+        # 2. ÉP NHIỆT ĐỘ = 0.0
         response = model.generate_content(
             content_parts,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.0,
+            )
         )
 
         react_content = response.text
