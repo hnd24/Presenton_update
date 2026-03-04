@@ -27,6 +27,7 @@ import json
 import os
 from constants.llm import DEFAULT_GOOGLE_MODEL
 import xml.etree.ElementTree as ET
+import traceback
 
 # Create separate routers for each functionality
 SLIDE_TO_HTML_ROUTER = APIRouter(prefix="/slide-to-html", tags=["slide-to-html"])
@@ -165,45 +166,33 @@ def get_google_api_key():
     return None
 
 def parse_oxml_to_elements(xml_str: str) -> list:
-    """Hàm trích xuất tọa độ (chuyển EMU sang Pixel) và nội dung text từ OXML an toàn"""
+    """Hàm trích xuất tọa độ an toàn tuyệt đối"""
     if not xml_str:
         return []
     try:
-        # Đọc XML trực tiếp
         root = ET.fromstring(xml_str)
-        
-        # Xóa bỏ namespace của XML Tree một cách an toàn để dễ tìm kiếm thẻ
+        # Xóa namespace an toàn để không sập khi có ký tự lạ
         for elem in root.iter():
             if '}' in elem.tag:
                 elem.tag = elem.tag.split('}', 1)[1]
         
         elements = []
-        # Tìm các thẻ chứa hình khối, ảnh, và frame
         for node in root.findall('.//sp') + root.findall('.//pic') + root.findall('.//graphicFrame'):
             off = node.find('.//off')
             ext = node.find('.//ext')
             if off is not None and ext is not None:
-                # Đổi EMU sang Pixel (1 Pixel = 9525 EMU)
                 x = round(int(off.get('x', 0)) / 9525, 2)
                 y = round(int(off.get('y', 0)) / 9525, 2)
                 w = round(int(ext.get('cx', 0)) / 9525, 2)
                 h = round(int(ext.get('cy', 0)) / 9525, 2)
-                
-                # Lấy text (nếu có)
                 texts = [t.text for t in node.findall('.//t') if t.text]
-                text_content = " ".join(texts).strip()
-                
                 elements.append({
-                    "type": node.tag,
-                    "x": x,
-                    "y": y,
-                    "width": w,
-                    "height": h,
-                    "text": text_content if text_content else None
+                    "type": node.tag, "x": x, "y": y, "width": w, "height": h, 
+                    "text": " ".join(texts).strip() if texts else None
                 })
         return elements
     except Exception as e:
-        print(f"OXML Parsing Error: {e}") # Lỗi sẽ in ra Terminal ở đây
+        print(f"--- LỖI PARSE OXML: {e} ---")
         return []
 
 
@@ -597,68 +586,67 @@ async def convert_slide_to_html(request: SlideToHtmlRequest):
     #         status_code=500, detail=f"Error processing slide to HTML: {str(e)}"
     #     )
     try:
+        print("=== BẮT ĐẦU XỬ LÝ SLIDE ===")
         google_key = get_google_api_key()
         if not google_key:
-            raise HTTPException(status_code=400, detail="Google API Key không tồn tại.")
-        
+            return SlideToHtmlResponse(success=False, html="")
+
         genai.configure(api_key=google_key)
-        
         model = genai.GenerativeModel(
             model_name=DEFAULT_GOOGLE_MODEL,
             system_instruction=GENERATE_HTML_SYSTEM_PROMPT
         )
         
-        # Đọc file ảnh
+        # 1. Xử lý ảnh
         image_path = request.image
+        actual_image_path = image_path
         if image_path.startswith("/app_data/images/"):
             actual_image_path = os.path.join(get_images_directory(), image_path[len("/app_data/images/"):])
         elif image_path.startswith("/static/"):
             actual_image_path = os.path.join("static", image_path[len("/static/"):])
-        else:
-            actual_image_path = image_path if os.path.isabs(image_path) else os.path.join(get_images_directory(), image_path)
+        elif not os.path.isabs(image_path):
+            actual_image_path = os.path.join(get_images_directory(), image_path)
 
         if not os.path.exists(actual_image_path):
-            raise HTTPException(status_code=404, detail=f"Không tìm thấy file ảnh slide tại: {image_path}")
+            return SlideToHtmlResponse(success=False, html=f"")
 
         with open(actual_image_path, "rb") as f:
             image_data = f.read()
+
         ext = os.path.splitext(actual_image_path)[1].lower()
         mime_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(ext, "image/png")
 
-        # --- GỌI HÀM PARSE OXML THÀNH JSON ---
+        # 2. Xử lý OXML và Font
         parsed_elements = parse_oxml_to_elements(request.xml)
         elements_json = json.dumps(parsed_elements, indent=2)
-
-        # Xử lý Font
-        fonts_text = ""
-        if request.fonts:
-            fonts_text = f"\nFONTS (Safe Tailwind fonts to map to): {', '.join(request.fonts)}"
         
-        # Gom Prompt (Sử dụng JSON đã được Python tính sẵn Pixel)
+        fonts_text = f"\nFONTS: {', '.join(request.fonts)}" if request.fonts else ""
         user_prompt = f"SLIDE ELEMENTS (Absolute coordinates in Pixels):\n{elements_json}\n{fonts_text}"
 
-        content_parts = [
-            {"mime_type": mime_type, "data": image_data},
-            user_prompt
-        ]
+        content_parts = [{"mime_type": mime_type, "data": image_data}, user_prompt]
         
+        # 3. Gọi Gemini
+        print("Đang gửi request lên Gemini...")
         response = model.generate_content(
             content_parts,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.0,
-            )
+            generation_config=genai.types.GenerationConfig(temperature=0.0)
         )
 
-        html_content = response.text
-        html_content = html_content.replace("```html", "").replace("```", "").strip()
-        
-        return SlideToHtmlResponse(success=True, html=html_content)
-        
-    except ResourceExhausted:
-        raise HTTPException(status_code=429, detail="Bạn đã dùng hết lượt AI miễn phí (15 lần/phút).")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate HTML: {str(e)}")
+        try:
+            html_content = response.text
+        except ValueError as ve:
+            # Bắt lỗi khi Gemini từ chối trả lời vì bộ lọc an toàn
+            return SlideToHtmlResponse(success=False, html=f"")
 
+        html_content = html_content.replace("```html", "").replace("```", "").strip()
+        print("=== XỬ LÝ SLIDE THÀNH CÔNG ===")
+        return SlideToHtmlResponse(success=True, html=html_content)
+
+    except Exception as e:
+        # Bắt TẤT CẢ các lỗi crash và in traceback đỏ chót ra terminal
+        print("=== CRITICAL BACKEND ERROR ===")
+        traceback.print_exc() 
+        return SlideToHtmlResponse(success=False, html=f"")
 
 
 # ENDPOINT 2: HTML to React component conversion
