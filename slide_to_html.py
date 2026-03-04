@@ -26,6 +26,7 @@ from google.api_core.exceptions import ResourceExhausted
 import json
 import os
 from constants.llm import DEFAULT_GOOGLE_MODEL
+import xml.etree.ElementTree as ET
 
 # Create separate routers for each functionality
 SLIDE_TO_HTML_ROUTER = APIRouter(prefix="/slide-to-html", tags=["slide-to-html"])
@@ -164,28 +165,31 @@ def get_google_api_key():
     return None
 
 def parse_oxml_to_elements(xml_str: str) -> list:
-    """Hàm trích xuất tọa độ (chuyển EMU sang Pixel) và nội dung text từ OXML"""
+    """Hàm trích xuất tọa độ (chuyển EMU sang Pixel) và nội dung text từ OXML an toàn"""
     if not xml_str:
         return []
     try:
-        # Xóa các namespaces của XML để dễ parse
-        xml_clean = re.sub(r'\sxmlns(:\w+)?="[^"]+"', '', xml_str)
-        xml_clean = re.sub(r'([a-zA-Z0-9]+):', '', xml_clean)
-        root = ET.fromstring(xml_clean)
+        # Đọc XML trực tiếp
+        root = ET.fromstring(xml_str)
+        
+        # Xóa bỏ namespace của XML Tree một cách an toàn để dễ tìm kiếm thẻ
+        for elem in root.iter():
+            if '}' in elem.tag:
+                elem.tag = elem.tag.split('}', 1)[1]
         
         elements = []
-        # Tìm tất cả các thẻ shape, picture, graphicFrame
+        # Tìm các thẻ chứa hình khối, ảnh, và frame
         for node in root.findall('.//sp') + root.findall('.//pic') + root.findall('.//graphicFrame'):
             off = node.find('.//off')
             ext = node.find('.//ext')
             if off is not None and ext is not None:
-                # Chuyển đổi EMU sang Pixel (1 Pixel = 9525 EMU)
+                # Đổi EMU sang Pixel (1 Pixel = 9525 EMU)
                 x = round(int(off.get('x', 0)) / 9525, 2)
                 y = round(int(off.get('y', 0)) / 9525, 2)
                 w = round(int(ext.get('cx', 0)) / 9525, 2)
                 h = round(int(ext.get('cy', 0)) / 9525, 2)
                 
-                # Trích xuất text (nếu có)
+                # Lấy text (nếu có)
                 texts = [t.text for t in node.findall('.//t') if t.text]
                 text_content = " ".join(texts).strip()
                 
@@ -199,8 +203,9 @@ def parse_oxml_to_elements(xml_str: str) -> list:
                 })
         return elements
     except Exception as e:
-        print(f"OXML Parsing Error: {e}")
+        print(f"OXML Parsing Error: {e}") # Lỗi sẽ in ra Terminal ở đây
         return []
+
 
 # async def generate_html_from_slide(
 #     base64_image: str,
